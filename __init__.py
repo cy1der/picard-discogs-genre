@@ -34,6 +34,10 @@ class DiscogsGenreOptionsPage(OptionsPage):
         self.token_input = QtWidgets.QLineEdit(self)
         self.token_input.setPlaceholderText("Account > Settings > Developers > Generate token")
         
+        self.style_input = QtWidgets.QLineEdit(self)
+        self.style_input.setPlaceholderText("grouping")
+        self.style_input.setToolTip("Metadata tag to store Discogs style (default: grouping), set it blank to disable")
+    
         min_overlap_layout = QtWidgets.QHBoxLayout()
         
         min_overlap_label = QtWidgets.QLabel("Minimum Token Overlap", self)
@@ -50,6 +54,8 @@ class DiscogsGenreOptionsPage(OptionsPage):
 
         options_layout.addWidget(QtWidgets.QLabel("Personal Access Token (recommended for higher rate limits)", self))
         options_layout.addWidget(self.token_input)
+        options_layout.addWidget(QtWidgets.QLabel("Style Tag", self))
+        options_layout.addWidget(self.style_input)
         options_layout.addLayout(min_overlap_layout)
 
         layout.addWidget(options_group)
@@ -57,10 +63,12 @@ class DiscogsGenreOptionsPage(OptionsPage):
 
     def load(self):
         self.token_input.setText(config.setting["discogs_personal_access_token"] or "")
+        self.style_input.setText(config.setting["discogs_style_tag"] or "grouping")
         self.min_overlap_input.setValue(config.setting["discogs_minimum_token_overlap"] or 80)
 
     def save(self):
         config.setting["discogs_personal_access_token"] = self.token_input.text().strip()
+        config.setting["discogs_style_tag"] = self.style_input.text().strip()
         config.setting["discogs_minimum_token_overlap"] = self.min_overlap_input.value()
 
 class DiscogsGenreProcessor:
@@ -280,8 +288,10 @@ class DiscogsGenreProcessor:
                 
                 for genre in genres:
                     metadata.add('genre', genre)
-                for style in styles:
-                    metadata.add('style', style)
+                    
+                if config.setting["discogs_style_tag"] is not None and config.setting["discogs_style_tag"] != "":
+                    for style in styles:
+                        metadata.add(config.setting["discogs_style_tag"] or "grouping", style)
         finally:
             album._requests -= 1
             if album._requests == 0:
@@ -343,8 +353,10 @@ class DiscogsGenreProcessor:
 
             for genre in genres:
                 metadata.add('genre', genre)
-            for style in styles:
-                metadata.add('style', style)
+            
+            if config.setting["discogs_style_tag"] is not None and config.setting["discogs_style_tag"] != "":
+                for style in styles:
+                    metadata.add(config.setting["discogs_style_tag"] or "grouping", style)
 
         finally:
             album._requests -= 1
