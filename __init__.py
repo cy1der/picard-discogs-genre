@@ -1,5 +1,4 @@
 import re
-import json
 import urllib.parse
 import functools
 import unicodedata
@@ -68,6 +67,14 @@ class DiscogsGenreProcessor:
     def __init__(self):
         self.host = "api.discogs.com"
 
+    def _clean_search_text(self, text: str) -> str:
+        if not text:
+            return ""
+
+        text = unicodedata.normalize("NFKC", text).strip()
+        text = re.sub(r"\s+", " ", text)
+        return text
+
     def _normalize_text(self, text: str) -> str:
         if not text:
             return ""
@@ -79,6 +86,69 @@ class DiscogsGenreProcessor:
 
         text = "".join(ch if ch.isalnum() else " " for ch in text)
         return re.sub(r"\s+", " ", text).strip()
+
+    def _collapse_search_tokens(self, text: str) -> str:
+        if not text:
+            return ""
+
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+        text = "".join(ch if ch.isalnum() or ch.isspace() else "" for ch in text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _artist_search_variants(self, artist: str) -> list[str]:
+        variants: list[str] = []
+
+        def add_variant(value: str) -> None:
+            cleaned = self._clean_search_text(value)
+            if cleaned and cleaned not in variants:
+                variants.append(cleaned)
+
+        add_variant(artist)
+        add_variant(self._collapse_search_tokens(artist))
+
+        normalized_tokens = [token for token in self._normalize_text(artist).split() if len(token) > 1]
+        collapsed_tokens = [token for token in self._collapse_search_tokens(artist).split() if len(token) > 1]
+
+        if collapsed_tokens:
+            add_variant(" ".join(collapsed_tokens))
+
+        if len(collapsed_tokens) > 1:
+            add_variant(max(collapsed_tokens, key=len))
+
+        if normalized_tokens:
+            add_variant(" ".join(normalized_tokens))
+
+        if len(normalized_tokens) > 1:
+            add_variant(max(normalized_tokens, key=len))
+
+        return variants
+
+    def _build_search_attempts(self, artists: list[str], title: str, token: str) -> list[dict[str, str]]:
+        artist_variants = self._artist_search_variants(artists[0]) if artists else []
+        title_variants = [self._clean_search_text(title)]
+
+        collapsed_title = self._collapse_search_tokens(title)
+        if collapsed_title and collapsed_title not in title_variants:
+            title_variants.append(collapsed_title)
+
+        attempts: list[dict[str, str]] = []
+
+        for artist_variant in artist_variants or [""]:
+            for title_variant in title_variants:
+                query_params = {
+                    'artist': artist_variant,
+                    'release_title': title_variant,
+                    'type': 'master'
+                }
+
+                if token:
+                    query_params['token'] = token
+
+                if query_params not in attempts:
+                    attempts.append(query_params)
+
+        return attempts
 
     def _token_overlap(self, left: str, right: str) -> float:
         left_tokens = set(left.split())
@@ -134,31 +204,74 @@ class DiscogsGenreProcessor:
             self.search_discogs(album, metadata, artists, title, token)
 
     def search_discogs(self, album: Album, metadata: Metadata, artists: list[str], title: str, token: str):
-        query_params = {
-            'artist': self._normalize_text(artists[0]),
-            'release_title': self._normalize_text(title),
-            'type': 'master'
-        }
-        
-        if token:
-            query_params['token'] = token
+        attempts = self._build_search_attempts(artists, title, token)
+        if not attempts:
+            album._requests -= 1
+            if album._requests == 0:
+                album._finalize_loading(None)
+            return
 
+        self._perform_search_attempt(album, metadata, artists, title, attempts, 0)
+
+    def _perform_search_attempt(
+        self,
+        album: Album,
+        metadata: Metadata,
+        artists: list[str],
+        title: str,
+        attempts: list[dict[str, str]],
+        attempt_index: int,
+    ) -> None:
+        query_params = attempts[attempt_index]
         path = "/database/search?" + urllib.parse.urlencode(query_params)
         full_url = f"https://{self.host}{path}"
 
         album.tagger.webservice.get_url( # type: ignore
             url=full_url,
             parse_response_type="json",
-            handler=functools.partial(self.handle_search_response, album, metadata, artists, title)
+            handler=functools.partial(
+                self.handle_search_response,
+                album,
+                metadata,
+                artists,
+                title,
+                attempts,
+                attempt_index,
+            )
         )
 
-    def handle_search_response(self, album: Album, metadata: Metadata, artists: list[str], title: str, response, reply, error):
+    def handle_search_response(
+        self,
+        album: Album,
+        metadata: Metadata,
+        artists: list[str],
+        title: str,
+        attempts: list[dict[str, str]],
+        attempt_index: int,
+        response,
+        reply,
+        error,
+    ):
         try:
             if error or not response:
                 log.error(f"Discogs Search API failed: {error}")
                 return
 
             results = response.get('results', [])
+
+            if not results and attempt_index + 1 < len(attempts):
+                next_attempt = attempts[attempt_index + 1]
+                log.debug(
+                    "Discogs search returned no results for artist=%r title=%r, retrying with artist=%r title=%r",
+                    attempts[attempt_index].get('artist', ''),
+                    attempts[attempt_index].get('release_title', ''),
+                    next_attempt.get('artist', ''),
+                    next_attempt.get('release_title', ''),
+                )
+                album._requests += 1
+                self._perform_search_attempt(album, metadata, artists, title, attempts, attempt_index + 1)
+                return
+
             valid_result = self.validate_search_results(artists, title, results)
 
             if valid_result:
