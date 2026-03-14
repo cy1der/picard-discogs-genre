@@ -2,12 +2,13 @@ import re
 import urllib.parse
 import functools
 import unicodedata
-from PyQt5 import QtWidgets
+from PyQt5 import QtWidgets, QtCore
 
 from picard import log, config
 from picard.webservice import ratecontrol
 from picard.metadata import register_album_metadata_processor
 from picard.ui.options import register_options_page, OptionsPage
+from picard.ui.itemviews import register_album_action, BaseAction
 from picard.album import Album
 from picard.metadata import Metadata
 
@@ -74,6 +75,26 @@ class DiscogsGenreOptionsPage(OptionsPage):
 class DiscogsGenreProcessor:
     def __init__(self):
         self.host = "api.discogs.com"
+
+    def _add_discogs_tags(self, metadata: Metadata, genres: list[str], styles: list[str]) -> None:
+        metadata.delete('genre')
+        for genre in genres:
+            metadata.add('genre', genre)
+
+        style_tag = config.setting["discogs_style_tag"]
+        if style_tag is not None and style_tag != "":
+            tag_name = style_tag or "grouping"
+            metadata.delete(tag_name)
+            for style in styles:
+                metadata.add(tag_name, style)
+
+    def _propagate_tags_to_album_tracks(self, album: Album, genres: list[str], styles: list[str]) -> None:
+        for track in album.tracks:
+            self._add_discogs_tags(track.metadata, genres, styles)
+            for file in track.files:
+                self._add_discogs_tags(file.metadata, genres, styles)
+                file.update()
+            track.update()
 
     def _clean_search_text(self, text: str) -> str:
         if not text:
@@ -257,7 +278,7 @@ class DiscogsGenreProcessor:
         attempts: list[dict[str, str]],
         attempt_index: int,
         response,
-        reply,
+        _reply,
         error,
     ):
         try:
@@ -285,13 +306,8 @@ class DiscogsGenreProcessor:
             if valid_result:
                 genres = valid_result.get('genre', [])
                 styles = valid_result.get('style', [])
-                
-                for genre in genres:
-                    metadata.add('genre', genre)
-                    
-                if config.setting["discogs_style_tag"] is not None and config.setting["discogs_style_tag"] != "":
-                    for style in styles:
-                        metadata.add(config.setting["discogs_style_tag"] or "grouping", style)
+
+                self._add_discogs_tags(metadata, genres, styles)
         finally:
             album._requests -= 1
             if album._requests == 0:
@@ -328,7 +344,15 @@ class DiscogsGenreProcessor:
 
         return None
 
-    def fetch_discogs_tags(self, album: Album, metadata: Metadata, entity_type: str, entity_id: str, token: str):
+    def fetch_discogs_tags(
+        self,
+        album: Album,
+        metadata: Metadata,
+        entity_type: str,
+        entity_id: str,
+        token: str,
+        use_album_requests: bool = True,
+    ):
         path = f"/{entity_type}s/{entity_id}"
         if token:
             path += f"?token={token}"
@@ -339,10 +363,10 @@ class DiscogsGenreProcessor:
             url=full_url,
             parse_response_type="json",
             priority=True,
-            handler=functools.partial(self.handle_tags_response, album, metadata)
+            handler=functools.partial(self.handle_tags_response, album, metadata, use_album_requests)
         )
 
-    def handle_tags_response(self, album: Album, metadata: Metadata, response, reply, error):
+    def handle_tags_response(self, album: Album, metadata: Metadata, use_album_requests: bool, response, reply, error):
         try:
             if error or not response:
                 log.error(f"Discogs Tags API failed: {error}")
@@ -351,17 +375,90 @@ class DiscogsGenreProcessor:
             genres = response.get('genres', [])
             styles = response.get('styles', [])
 
-            for genre in genres:
-                metadata.add('genre', genre)
-            
-            if config.setting["discogs_style_tag"] is not None and config.setting["discogs_style_tag"] != "":
-                for style in styles:
-                    metadata.add(config.setting["discogs_style_tag"] or "grouping", style)
+            self._add_discogs_tags(metadata, genres, styles)
+
+            if not use_album_requests:
+                self._propagate_tags_to_album_tracks(album, genres, styles)
 
         finally:
-            album._requests -= 1
-            if album._requests == 0:
+            if use_album_requests:
+                if album._requests > 0:
+                    album._requests -= 1
+                else:
+                    log.warning("Discogs tags response received with no pending album requests")
+
+            if use_album_requests and not album.loaded and album._requests == 0:
                 album._finalize_loading(None)
+            elif (use_album_requests and album.loaded and album._requests == 0) or not use_album_requests:
+                album.update()
+
+class DiscogsManualSearchAction(BaseAction):
+    NAME = "[Discogs] Manual Search"
+    
+    def __init__(self):
+        super().__init__()
+
+    def callback(self, objs):
+        albums = [a for a in objs if isinstance(a, Album)]
+
+        if not albums:
+            return
+
+        for album in albums:
+            title = album.metadata.get('album', '') if getattr(album, 'metadata', None) else ''
+
+            prompt = "Enter Discogs master/release code"
+            if title:
+                prompt = f"{prompt} for \"{title}\""
+            prompt = f"{prompt}\nFound in the top right corner of the page, example: [m123456] or [r123456]"
+
+            parent = QtWidgets.QApplication.activeWindow()
+            input_dialog = QtWidgets.QInputDialog(parent)
+            input_dialog.setWindowTitle("Discogs Manual Search")
+            input_dialog.setLabelText(prompt)
+            input_dialog.setInputMode(QtWidgets.QInputDialog.TextInput)
+            input_dialog.setTextValue("")
+
+            def focus_input() -> None:
+                line_edit = input_dialog.findChild(QtWidgets.QLineEdit)
+                if line_edit:
+                    line_edit.setFocus()
+
+            QtCore.QTimer.singleShot(0, focus_input)
+
+            ok = input_dialog.exec_()
+            value = input_dialog.textValue()
+            
+            if not ok or not value.strip():
+                continue
+                
+            value = value.strip()
+            match = re.match(r'^\[[mMrR](\d+)\]$', value)
+            if match:
+                value = value[1:-1]
+            
+            if not match:
+                QtWidgets.QMessageBox.warning(
+                    parent,
+                    "Invalid code",
+                    "Please enter a valid Discogs master/release code, example: [m123456] or [r123456]",
+                )
+                continue
+            
+            entity_id = match.group(1)
+            entity_type = 'master' if value.strip().lower().startswith('m') else 'release'
+            
+            token = (config.setting["discogs_personal_access_token"] or "").strip()
+
+            DiscogsGenreProcessor().fetch_discogs_tags(
+                album,
+                album.metadata,
+                entity_type,
+                entity_id,
+                token,
+                use_album_requests=False,
+            )
 
 register_options_page(DiscogsGenreOptionsPage)
+register_album_action(DiscogsManualSearchAction())
 register_album_metadata_processor(DiscogsGenreProcessor().process_album)
