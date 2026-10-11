@@ -1,0 +1,11 @@
+uuid = "56ad9334-7b17-4cef-8e8b-b22fa2bf5f0e"
+name = "Discogs Genre & Style"
+description = "Fetches genres and styles from Discogs"
+version = "2.0.0"
+api = ["3.0"]
+authors = ["cy1der"]
+license = "GPL-2.0-or-later"
+license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
+homepage = "https://github.com/cy1der/picard-discogs-genre"
+report_bugs_to = "https://github.com/cy1der/picard-discogs-genre/issues"
+categories = ["metadata"]

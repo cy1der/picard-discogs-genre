@@ -1,17 +1,16 @@
-from typing import List
-from picard.config import TextOption, IntOption, Option
+DISCOGS_HOST = "api.discogs.com"
 
-PLUGIN_NAME = "Discogs Genre & Style"
-PLUGIN_AUTHOR = "cy1der"
-PLUGIN_DESCRIPTION = "Fetches genres and styles from Discogs"
-PLUGIN_VERSION = "1.0.3"
-PLUGIN_API_VERSIONS = ["2.0", "2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7", "2.8", "2.9", "2.10", "2.11", "2.12", "2.13"]
-PLUGIN_LICENSE = "GPL-2.0-or-later"
-PLUGIN_LICENSE_URL = "https://www.gnu.org/licenses/gpl-2.0.html"
-PLUGIN_USER_GUIDE_URL = "https://github.com/cy1der/picard-discogs-genre"
+OPTION_TOKEN = "personal_access_token"
+OPTION_STYLE_TAG = "style_tag"
+OPTION_MIN_OVERLAP = "minimum_token_overlap"
 
-CONFIG_OPTIONS: List[Option] = [
-    TextOption("setting", "discogs_personal_access_token", ""),
-    TextOption("setting", "discogs_style_tag", "grouping"),
-    IntOption("setting", "discogs_minimum_token_overlap", 80)
-]
+DEFAULT_TOKEN = ""
+DEFAULT_STYLE_TAG = "grouping"
+DEFAULT_MIN_OVERLAP = 80
+
+# Plugin API v2 stored settings in Picard's global section under these names
+LEGACY_OPTION_NAMES = {
+    OPTION_TOKEN: "discogs_personal_access_token",
+    OPTION_STYLE_TAG: "discogs_style_tag",
+    OPTION_MIN_OVERLAP: "discogs_minimum_token_overlap",
+}
